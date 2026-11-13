@@ -41,8 +41,9 @@ FEEDS = [
     # --- 米国 ---
     {"name": "Fox News World", "base": "米国", "kind": "民間", "mideast": False,
      "url": "https://moxie.foxnews.com/google-publisher/world.xml"},
-    {"name": "Newsmax", "base": "米国", "kind": "民間", "mideast": False,
-     "url": "https://www.newsmax.com/rss/Newsfront/16/"},
+    # Newsmax はRSSが応答しない（ボット対策の可能性）ため外した。代わりに米保守寄りの国際面
+    {"name": "New York Post World", "base": "米国", "kind": "民間", "mideast": False,
+     "url": "https://nypost.com/world-news/feed/"},
     {"name": "CBN News World", "base": "米国", "kind": "宗教系(キリスト教)", "mideast": False,
      "url": "https://www1.cbn.com/app_feeds/rss/news/rss.php?section=world"},
     {"name": "CBN News Israel", "base": "米国", "kind": "宗教系(キリスト教)", "mideast": True,
