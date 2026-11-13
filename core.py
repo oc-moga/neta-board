@@ -1,11 +1,13 @@
 """ネタ収集のコアロジック（画面に依存しない部分）"""
 import calendar
 import csv
+import gzip
 import io
 import json
 import re
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -15,47 +17,76 @@ JST = ZoneInfo("Asia/Tokyo")
 USER_AGENT = "neta-board/1.0 (personal use; SNS content research)"
 
 # ===== RSS設定 =====
-# filter=True の媒体は、中東タブのときだけキーワードに一致した記事に絞る
-# base は媒体の拠点（裏取りで、拠点の違う媒体を見比べるための目印）
-FEEDS_WORLD = [
-    {"name": "NHK 国際", "base": "日本", "filter": False,
+# base    : 媒体の拠点（裏取りで、拠点の違う媒体を見比べるための目印）
+# kind    : 運営形態（出典表記に添える。立場の評価ではなく、資本・運営の事実ベース）
+# mideast : True なら記事すべてを「中東関連」とする（中東専門フィード）
+#           False ならキーワードに一致した記事だけを「中東関連」とする
+# party_state : True は紛争当事国の政府系メディア。初期状態では表示しない
+FEEDS = [
+    # --- 日本 ---
+    {"name": "NHK 国際", "base": "日本", "kind": "公共放送", "mideast": False,
      "url": "https://www.nhk.or.jp/rss/news/cat6.xml"},
-    {"name": "BBC World", "base": "英国", "filter": False,
+    # --- 英国 ---
+    {"name": "BBC World", "base": "英国", "kind": "公共放送", "mideast": False,
      "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
-    {"name": "Al Jazeera", "base": "カタール", "filter": False,
-     "url": "https://www.aljazeera.com/xml/rss/all.xml"},
-    {"name": "Guardian World", "base": "英国", "filter": False,
-     "url": "https://www.theguardian.com/world/rss"},
-]
-FEEDS_MIDEAST = [
-    {"name": "NHK 国際", "base": "日本", "filter": True,
-     "url": "https://www.nhk.or.jp/rss/news/cat6.xml"},
-    {"name": "BBC Middle East", "base": "英国", "filter": False,
+    {"name": "BBC Middle East", "base": "英国", "kind": "公共放送", "mideast": True,
      "url": "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml"},
-    {"name": "Guardian Middle East", "base": "英国", "filter": False,
+    {"name": "Guardian World", "base": "英国", "kind": "民間", "mideast": False,
+     "url": "https://www.theguardian.com/world/rss"},
+    {"name": "Guardian Middle East", "base": "英国", "kind": "民間", "mideast": True,
      "url": "https://www.theguardian.com/world/middleeast/rss"},
-    {"name": "Al Jazeera", "base": "カタール", "filter": True,
+    # --- 欧州（英国以外） ---
+    {"name": "France 24 Middle East", "base": "フランス", "kind": "政府出資", "mideast": True,
+     "url": "https://www.france24.com/en/middle-east/rss"},
+    # --- 米国 ---
+    {"name": "Fox News World", "base": "米国", "kind": "民間", "mideast": False,
+     "url": "https://moxie.foxnews.com/google-publisher/world.xml"},
+    {"name": "Newsmax", "base": "米国", "kind": "民間", "mideast": False,
+     "url": "https://www.newsmax.com/rss/Newsfront/16/"},
+    {"name": "CBN News World", "base": "米国", "kind": "宗教系(キリスト教)", "mideast": False,
+     "url": "https://www1.cbn.com/app_feeds/rss/news/rss.php?section=world"},
+    {"name": "CBN News Israel", "base": "米国", "kind": "宗教系(キリスト教)", "mideast": True,
+     "url": "https://www1.cbn.com/app_feeds/rss/news/rss.php?section=israel"},
+    {"name": "NPR World", "base": "米国", "kind": "非営利", "mideast": False,
+     "url": "https://feeds.npr.org/1004/rss.xml"},
+    # --- 中東 ---
+    {"name": "Al Jazeera", "base": "カタール", "kind": "政府出資", "mideast": False,
      "url": "https://www.aljazeera.com/xml/rss/all.xml"},
-    {"name": "Times of Israel", "base": "イスラエル", "filter": False,
+    {"name": "The National", "base": "UAE", "kind": "王族系資本", "mideast": True,
+     "url": "https://www.thenationalnews.com/arc/outboundfeeds/rss/category/news/mena/?outputType=xml"},
+    {"name": "Times of Israel", "base": "イスラエル", "kind": "民間", "mideast": True,
      "url": "https://www.timesofisrael.com/feed/"},
+    {"name": "Haaretz", "base": "イスラエル", "kind": "民間", "mideast": True,
+     "url": "https://www.haaretz.com/srv/haaretz-latest-headlines"},
+    {"name": "Tehran Times", "base": "イラン", "kind": "国営系", "mideast": True,
+     "party_state": True, "url": "https://www.tehrantimes.com/rss"},
+    {"name": "Anadolu Agency", "base": "トルコ", "kind": "国営通信", "mideast": True,
+     "party_state": True, "url": "https://www.aa.com.tr/en/rss/default?cat=middle-east"},
+    # --- 国際機関 ---
+    {"name": "UN News Middle East", "base": "国連", "kind": "国際機関", "mideast": True,
+     "url": "https://news.un.org/feed/subscribe/en/news/region/middle-east/feed/rss.xml"},
 ]
+FETCH_TIMEOUT = 15  # 秒。応答しない媒体で画面が止まらないように
+MAX_PER_FEED = 15   # 1フィードあたりの最大件数（新しい順）。記事数の多い媒体に一覧が偏らないように
 
 KEYWORDS_JA = [
     "中東", "イラン", "イスラエル", "ガザ", "パレスチナ", "ハマス", "ヒズボラ",
     "レバノン", "シリア", "イエメン", "フーシ", "ホルムズ", "サウジ", "イラク",
     "カタール", "アラブ首長国", "オマーン", "ヨルダン川", "湾岸", "テヘラン",
+    "バーレーン", "クウェート",
 ]
 KEYWORDS_EN = [
     "Middle East", "Iran", "Iranian", "Israel", "Israeli", "Gaza", "Palestin\\w*",
     "Hamas", "Hezbollah", "Lebanon", "Syria", "Yemen", "Houthi\\w*", "Hormuz",
     "Saudi", "Iraq", "Qatar", "Emirates", "Oman", "West Bank", "Tehran", "Gulf",
+    "Bahrain", "Kuwait", "UAE",
 ]
 PATTERN = re.compile(
     "|".join(KEYWORDS_JA) + "|" + "|".join(rf"\b{k}\b" for k in KEYWORDS_EN),
     re.IGNORECASE,
 )
 
-NEWS_COLS = ["媒体", "拠点", "タイトル", "要約", "公開日時", "ヒットしたキーワード", "URL"]
+NEWS_COLS = ["媒体", "拠点", "運営形態", "当事国政府系", "タイトル", "要約", "公開日時", "中東関連", "ヒットしたキーワード", "URL"]
 HISTORY_COLS = ["日付", "区分", "年", "内容", "日本関連(推定)", "要確認メモ", "出典URL"]
 
 
@@ -69,25 +100,54 @@ def find_hits(text: str) -> list:
     return sorted({m.group(0) for m in PATTERN.finditer(text)})
 
 
-def fetch_feeds(feeds: list, hours: int, apply_filter: bool):
-    """RSSを取得して (記事リスト, 取得失敗した媒体名のリスト) を返す"""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    items, errors, seen = [], [], set()
+def _fetch_one(f: dict):
+    """1媒体ぶんを取得してパース。失敗したら None"""
+    try:
+        req = urllib.request.Request(f["url"], headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as res:
+            data = res.read()
+        if data[:2] == b"\x1f\x8b":  # 頼んでいなくてもgzipで返す媒体がある（UN Newsなど）
+            data = gzip.decompress(data)
+        parsed = feedparser.parse(data)
+    except Exception:
+        return None
+    if parsed.bozo and not parsed.entries:
+        return None
+    return parsed
 
-    for f in feeds:
-        parsed = feedparser.parse(f["url"], agent=USER_AGENT)
-        if parsed.bozo and not parsed.entries:
+
+def fetch_feeds(feeds: list, hours: int):
+    """RSSを取得して (記事リスト, 取得失敗した媒体名のリスト) を返す
+    各記事の "mideast" は中東関連かどうか（専門フィード由来 or キーワード一致）"""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    items, errors, seen = [], [], {}
+
+    # 媒体数が多いので並列で取得（結果は FEEDS の並び順のまま処理する）
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(_fetch_one, feeds))
+
+    for f, parsed in zip(feeds, results):
+        if parsed is None:
             errors.append(f["name"])
             continue
-        for e in parsed.entries:
+        count = 0
+        # 上限で切る前に新しい順へ並べ替え（フィードによっては並びが日付順でない）
+        entries = sorted(parsed.entries, reverse=True,
+                         key=lambda e: tuple(e.get("published_parsed")
+                                             or e.get("updated_parsed") or ()))
+        for e in entries:
+            if count >= MAX_PER_FEED:
+                break
             link = e.get("link", "")
-            if not link or link in seen:
+            if not link:
+                continue
+            if link in seen:
+                # 同じ記事が総合フィードと中東フィードの両方にある場合は、中東扱いを引き継ぐ
+                seen[link]["mideast"] = seen[link]["mideast"] or f["mideast"]
                 continue
             title = clean(e.get("title", ""), 150)
             summary = clean(e.get("summary", ""))
             hits = find_hits(f"{title} {summary}")
-            if apply_filter and f.get("filter") and not hits:
-                continue
 
             pub = e.get("published_parsed") or e.get("updated_parsed")
             pub_dt = None
@@ -96,11 +156,16 @@ def fetch_feeds(feeds: list, hours: int, apply_filter: bool):
                 pub_dt = datetime.fromtimestamp(calendar.timegm(pub), tz=timezone.utc)
                 if pub_dt < cutoff:
                     continue
-            seen.add(link)
-            items.append({
-                "media": f["name"], "base": f["base"], "title": title,
-                "summary": summary, "pub_dt": pub_dt, "hits": hits, "url": link,
-            })
+            item = {
+                "media": f["name"], "base": f["base"], "kind": f["kind"],
+                "title": title, "summary": summary, "pub_dt": pub_dt,
+                "hits": hits, "url": link,
+                "mideast": f["mideast"] or bool(hits),
+                "party_state": f.get("party_state", False),
+            }
+            seen[link] = item
+            items.append(item)
+            count += 1
 
     items.sort(key=lambda i: i["pub_dt"] or datetime.min.replace(tzinfo=timezone.utc),
                reverse=True)
@@ -113,14 +178,25 @@ def pub_label(item) -> str:
     return item["pub_dt"].astimezone(JST).strftime("%m/%d %H:%M")
 
 
+def source_label(item) -> str:
+    """例: Al Jazeera（カタール・政府出資）"""
+    return f"{item['media']}（{item['base']}・{item['kind']}）"
+
+
 def news_copy_text(item) -> str:
-    return f"{item['title']}\n出典: {item['media']}（{item['base']}）\n{item['url']}"
+    pub = "公開日時: 不明" if not item["pub_dt"] else f"公開: {pub_label(item)}（日本時間）"
+    note = "\n※紛争当事国の政府系メディアの報道" if item["party_state"] else ""
+    return (f"{item['title']}\n"
+            f"出典: {source_label(item)}・{pub}{note}\n"
+            f"{item['url']}")
 
 
 def news_rows(items) -> list:
     return [{
-        "媒体": i["media"], "拠点": i["base"], "タイトル": i["title"],
+        "媒体": i["media"], "拠点": i["base"], "運営形態": i["kind"],
+        "当事国政府系": "○" if i["party_state"] else "", "タイトル": i["title"],
         "要約": i["summary"], "公開日時": pub_label(i),
+        "中東関連": "○" if i["mideast"] else "",
         "ヒットしたキーワード": " / ".join(i["hits"]), "URL": i["url"],
     } for i in items]
 

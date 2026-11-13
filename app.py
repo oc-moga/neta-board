@@ -28,13 +28,8 @@ def check_password() -> bool:
 
 
 @st.cache_data(ttl=1800, show_spinner="ニュースを取得中...")
-def load_world(hours: int):
-    return core.fetch_feeds(core.FEEDS_WORLD, hours, apply_filter=False)
-
-
-@st.cache_data(ttl=1800, show_spinner="中東ニュースを取得中...")
-def load_mideast(hours: int):
-    return core.fetch_feeds(core.FEEDS_MIDEAST, hours, apply_filter=True)
+def load_news(hours: int):
+    return core.fetch_feeds(core.FEEDS, hours)
 
 
 @st.cache_data(ttl=86400, show_spinner="Wikipediaから取得中...")
@@ -45,9 +40,22 @@ def load_history(month: int, day: int):
 HOURS_OPTIONS = [12, 24, 36, 48, 72]
 
 
-def render_news(items, errors, prefix: str, show_hits: bool = False):
+def render_news(items, errors, prefix: str):
     if errors:
         st.warning("取得できなかった媒体: " + "、".join(errors) + "（URL変更の可能性）")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        only_me = st.toggle("🕌 中東関連だけ", value=False, key=f"{prefix}_me")
+    with c2:
+        show_ps = st.toggle("当事国の政府系も表示", value=False, key=f"{prefix}_ps",
+                            help="イラン（Tehran Times）・トルコ（Anadolu）の政府系メディア。"
+                                 "当事国の公式見解を知る目的で使い、事実の裏取りには使わないのがおすすめ")
+    if not show_ps:
+        items = [i for i in items if not i["party_state"]]
+    if only_me:
+        items = [i for i in items if i["mideast"]]
+        st.caption("同じ出来事を拠点の違う2媒体以上が報じているか確認してから使うのがおすすめ")
     if not items:
         st.info("該当する記事はありませんでした")
         return
@@ -64,17 +72,21 @@ def render_news(items, errors, prefix: str, show_hits: bool = False):
     ]
     bases = Counter(i["base"] for i in view)
     st.caption(f"{len(view)}件　" + " / ".join(f"{b} {n}" for b, n in bases.items()))
+    name = "mideast" if only_me else prefix
     st.download_button(
         "CSVで保存", core.to_csv_bytes(core.news_rows(view), core.NEWS_COLS),
-        file_name=f"{prefix}_{datetime.now(core.JST):%Y%m%d}.csv",
+        file_name=f"{name}_{datetime.now(core.JST):%Y%m%d}.csv",
         mime="text/csv", key=f"{prefix}_dl",
     )
 
-    for idx, it in enumerate(view):
+    for it in view:
         with st.container(border=True):
             st.markdown(f"**{it['title']}**")
-            st.caption(f"{it['media']}（{it['base']}）・{core.pub_label(it)}")
-            if show_hits and it["hits"]:
+            st.caption(f"{core.source_label(it)}・{core.pub_label(it)}"
+                       + ("・🕌中東" if it["mideast"] else ""))
+            if it["party_state"]:
+                st.caption("⚠️ 紛争当事国の政府系メディア。公式見解として扱い、事実は他媒体で確認")
+            if it["hits"]:
                 st.caption("🔎 " + " / ".join(it["hits"]))
             if it["summary"]:
                 st.write(it["summary"])
@@ -131,20 +143,13 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    tab_world, tab_mideast, tab_history = st.tabs(["🌍 世界情勢", "🕌 中東", "📅 今日は何の日"])
+    tab_news, tab_history = st.tabs(["🌍 世界情勢・中東", "📅 今日は何の日"])
 
-    with tab_world:
+    with tab_news:
         hours = st.selectbox("対象期間", HOURS_OPTIONS, index=2,
-                             format_func=lambda h: f"直近{h}時間", key="world_hours")
-        items, errors = load_world(hours)
-        render_news(items, errors, "world")
-
-    with tab_mideast:
-        hours = st.selectbox("対象期間", HOURS_OPTIONS, index=2,
-                             format_func=lambda h: f"直近{h}時間", key="mideast_hours")
-        items, errors = load_mideast(hours)
-        st.caption("同じ出来事を拠点の違う2媒体以上が報じているか確認してから使うのがおすすめ")
-        render_news(items, errors, "mideast", show_hits=True)
+                             format_func=lambda h: f"直近{h}時間", key="news_hours")
+        items, errors = load_news(hours)
+        render_news(items, errors, "news")
 
     with tab_history:
         render_history()
