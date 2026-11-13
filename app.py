@@ -40,6 +40,34 @@ def load_history(month: int, day: int):
 HOURS_OPTIONS = [12, 24, 36, 48, 72]
 
 
+TOPIC_TOP_N = 5
+
+
+def render_topics(view, prefix: str):
+    """🔥 複数媒体が報じている話題を、媒体数の多い順に表示"""
+    topics = core.find_topics(view)[:TOPIC_TOP_N]
+    st.subheader("🔥 報道の多い話題")
+    st.caption("同じ話題を報じている媒体の数で並べた目安（閲覧数ではない）。"
+               "英語記事どうしを単語の重なりで判定しているので、取りこぼしや混ざりもある")
+    if not topics:
+        st.info("いま複数の媒体が報じている話題は見つかりませんでした")
+        return
+    top = len(topics[0]["brands"])
+    for n, t in enumerate(topics):
+        with st.container(border=True):
+            st.progress(len(t["brands"]) / top,
+                        text=f"**{len(t['brands'])}媒体**・拠点{len(t['bases'])}つ"
+                             f"（{'・'.join(t['bases'])}）")
+            st.markdown(f"**{t['articles'][0]['title']}**")
+            with st.expander(f"各媒体の見出し（{len(t['articles'])}件）"):
+                for i in t["articles"]:
+                    st.markdown(f"- [{i['title']}]({i['url']})")
+                    st.caption(f"　{core.source_label(i)}・{core.pub_label(i)}"
+                               + ("　⚠️当事国政府系" if i["party_state"] else ""))
+                st.code(core.topic_copy_text(t), language=None)
+    st.divider()
+
+
 def render_news(items, errors, prefix: str):
     if errors:
         st.warning("取得できなかった媒体: " + "、".join(errors) + "（URL変更の可能性）")
@@ -72,6 +100,8 @@ def render_news(items, errors, prefix: str):
         if i["media"] in selected
         and (not query or query.lower() in (i["title"] + i["summary"]).lower())
     ]
+    render_topics(view, prefix)
+
     bases = Counter(i["base"] for i in view)
     st.caption(f"{len(view)}件　" + " / ".join(f"{b} {n}" for b, n in bases.items()))
     name = "mideast" if only_me else prefix

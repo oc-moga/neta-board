@@ -232,6 +232,92 @@ def news_rows(items) -> list:
     } for i in items]
 
 
+# ===== 報道の多い話題（注目度の目安） =====
+# 閲覧数はRSSに入っていないので、「同じ話題を何媒体が報じているか」を目安にする。
+# タイトル＋要約の単語の重なりで判定する簡易版。言い回しが違うと取りこぼすことがあり、
+# 英語記事どうしだけを比べる（日本語のNHKは対象外）。
+STOPWORDS = set("""
+the a an and or of to in on for with as at by from is are was were be been has have had
+its it this that these those after before over into about amid says said say new more than
+his her their they he she we you will would could can may not but who what when where why
+how all also just one two three first last year years week day days people news live latest
+update updates report reports watch video
+""".split())
+TOPIC_MIN_SHARED = 4      # 共通する単語がこの数以上
+TOPIC_MIN_SIMILARITY = 0.18  # 単語の重なり具合（0〜1）がこの値以上なら同じ話題とみなす
+FEED_SECTIONS = (" Middle East", " World", " 国際")
+
+
+def brand(media: str) -> str:
+    """同じ会社の別フィードを1媒体として数えるための名前（BBC World と BBC Middle East → BBC）"""
+    if media.startswith("CBN News"):
+        return "CBN News"
+    for s in FEED_SECTIONS:
+        if media.endswith(s):
+            return media[: -len(s)]
+    return media
+
+
+def _topic_words(text: str) -> set:
+    words = re.findall(r"[A-Za-z][A-Za-z'\-]+", text)
+    return {w.lower().strip("'-") for w in words
+            if len(w) >= 3 and w.lower() not in STOPWORDS}
+
+
+def _is_english(title: str) -> bool:
+    return bool(re.search(r"[A-Za-z]{4}", title)) and not re.search(
+        r"[぀-ヿ一-鿿]", title)
+
+
+def find_topics(items: list, min_brands: int = 2) -> list:
+    """複数媒体が報じている話題をまとめ、媒体数の多い順に返す
+    各話題: {"articles": [...], "brands": [...], "bases": [...]}"""
+    arts = [i for i in items if _is_english(i["title"])]
+    words = [_topic_words(f"{i['title']} {i['summary']}") for i in arts]
+
+    parent = list(range(len(arts)))
+
+    def root(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a in range(len(arts)):
+        for b in range(a + 1, len(arts)):
+            if brand(arts[a]["media"]) == brand(arts[b]["media"]):
+                continue  # 同じ会社どうしは比べない（別媒体の裏付けにならないので）
+            shared = len(words[a] & words[b])
+            if shared >= TOPIC_MIN_SHARED and \
+                    shared / (len(words[a] | words[b]) or 1) >= TOPIC_MIN_SIMILARITY:
+                parent[root(a)] = root(b)
+
+    groups = {}
+    for idx, art in enumerate(arts):
+        groups.setdefault(root(idx), []).append(art)
+
+    topics = []
+    for g in groups.values():
+        brands = sorted({brand(i["media"]) for i in g})
+        if len(brands) < min_brands:
+            continue
+        g.sort(key=lambda i: i["pub_dt"] or datetime.min.replace(tzinfo=timezone.utc),
+               reverse=True)
+        topics.append({"articles": g, "brands": brands,
+                       "bases": sorted({i["base"] for i in g})})
+    topics.sort(key=lambda t: (len(t["brands"]), len(t["bases"]), len(t["articles"])),
+                reverse=True)
+    return topics
+
+
+def topic_copy_text(topic) -> str:
+    lines = [f"【{len(topic['brands'])}媒体が報道／拠点: {'・'.join(topic['bases'])}】"]
+    for i in topic["articles"]:
+        note = "　※紛争当事国の政府系メディア" if i["party_state"] else ""
+        lines.append(f"・{i['title']}\n  出典: {source_label(i)}・{pub_label(i)}{note}\n  {i['url']}")
+    return "\n".join(lines)
+
+
 def to_csv_bytes(rows: list, columns: list) -> bytes:
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
