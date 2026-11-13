@@ -64,6 +64,8 @@ def render_news(items, errors, prefix: str):
     with st.expander("絞り込み"):
         selected = st.multiselect("媒体", medias, default=medias, key=f"{prefix}_media")
         query = st.text_input("キーワード検索", key=f"{prefix}_q")
+        show_img = st.checkbox("画像を表示", value=True, key=f"{prefix}_img",
+                               help="外したら画像を読み込まないので、スマホの通信量を節約できる")
 
     view = [
         i for i in items
@@ -81,6 +83,9 @@ def render_news(items, errors, prefix: str):
 
     for it in view:
         with st.container(border=True):
+            if show_img and it["image"]:
+                # URLをそのまま渡すと、画像はブラウザが媒体のサーバーから直接読み込む
+                st.image(it["image"], width=320)
             st.markdown(f"**{it['title']}**")
             st.caption(f"{core.source_label(it)}・{core.pub_label(it)}"
                        + ("・🕌中東" if it["mideast"] else ""))

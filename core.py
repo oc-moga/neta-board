@@ -97,6 +97,36 @@ def clean(text: str, limit: int = 200) -> str:
     return text[:limit]
 
 
+IMG_TAG_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.IGNORECASE)
+
+
+def extract_image(e) -> str:
+    """記事の見出し画像URLを探す。媒体によって入っている場所が違うので順番に見る"""
+    def ok(url):
+        return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+    # 1) media:content（Guardian・Foxなど）。サイズ違いが複数あるときは一番大きいもの
+    medias = [m for m in e.get("media_content", [])
+              if ok(m.get("url")) and m.get("medium", "image") == "image"
+              and (m.get("type") or "image").startswith("image")]
+    if medias:
+        return max(medias, key=lambda m: int(m.get("width") or 0))["url"]
+    # 2) media:thumbnail（BBC・France 24など）
+    for m in e.get("media_thumbnail", []):
+        if ok(m.get("url")):
+            return m["url"]
+    # 3) 添付ファイル（enclosure）の画像（Tehran Times・UN Newsなど）
+    for link in e.get("links", []):
+        if (link.get("type") or "").startswith("image") and ok(link.get("href")):
+            return link["href"]
+    # 4) 本文HTMLの中の最初の<img>（NPR・Times of Israelなど）
+    html = (e.get("summary") or "") + "".join(c.get("value", "") for c in e.get("content", []))
+    m = IMG_TAG_RE.search(html)
+    if m and ok(m.group(1)):
+        return m.group(1)
+    return ""
+
+
 def find_hits(text: str) -> list:
     return sorted({m.group(0) for m in PATTERN.finditer(text)})
 
@@ -160,7 +190,7 @@ def fetch_feeds(feeds: list, hours: int):
             item = {
                 "media": f["name"], "base": f["base"], "kind": f["kind"],
                 "title": title, "summary": summary, "pub_dt": pub_dt,
-                "hits": hits, "url": link,
+                "hits": hits, "url": link, "image": extract_image(e),
                 "mideast": f["mideast"] or bool(hits),
                 "party_state": f.get("party_state", False),
             }
