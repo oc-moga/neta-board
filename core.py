@@ -327,17 +327,26 @@ def to_csv_bytes(rows: list, columns: list) -> bytes:
 
 
 # ===== 今日は何の日 =====
-SECTION_MAP = {"できごと": "できごと", "誕生日": "誕生", "忌日": "死去"}
+SECTION_MAP = {"できごと": "できごと", "誕生日": "誕生", "忌日": "死去", "記念日・年中行事": "記念日"}
 JAPAN_WORDS = [
     "日本", "天皇", "幕府", "将軍", "藩", "朝廷", "大化", "倭", "皇后", "上皇",
     "信長", "秀吉", "家康", "武田", "上杉", "北条", "足利", "徳川", "豊臣", "織田",
     "源頼朝", "源義経", "平清盛", "平氏", "源氏", "藤原", "鎌倉", "室町", "江戸",
     "戦国", "関ヶ原", "維新", "薩摩", "長州", "土佐", "明治", "大正", "昭和", "平成",
-    "令和", "京都", "大阪", "東京", "沖縄", "北海道", "蝦夷", "琉球", "首相", "内閣",
+    "令和", "京都", "大阪", "東京", "沖縄", "北海道", "蝦夷", "琉球", "内閣",
     "皇子", "蘇我", "中臣", "飛鳥", "奈良", "平安", "大名", "武士", "幕末", "神社",
+    # 地名・役所・近代史（「首相」は「インド首相」なども拾ってしまうので外した）
+    "県", "皇居", "皇室", "宮内", "国会", "衆議院", "参議院", "帝国議会", "内閣総理大臣",
+    "文相", "蔵相", "外相", "通産省", "文部省", "大蔵省", "自衛隊", "国鉄", "地方裁判所",
+    "戊辰", "西南戦争", "日清", "日露", "大本営", "連合艦隊", "寺",
 ]
-ITEM_RE = re.compile(r"^(紀元前)?(\d{1,4})年(?:[（(][^）)]*[）)])?\s*[-–－―ー]\s*(.+)$")
+# 人物の「、」の後ろにこれがあれば日本人ではないとみなす（漢字名の中国・朝鮮の人物など）
+FOREIGN_PERSON_HINTS = ["中国", "中華", "清の", "清朝", "韓国", "朝鮮", "台湾", "香港",
+                        "満洲", "モンゴル", "ベトナム", "皇帝", "王朝"]
+# 「1690年（元禄3年10月14日） - 本文」の形。かっこの中（和暦など）も取り出す
+ITEM_RE = re.compile(r"^(紀元前)?(\d{1,4})年\s*(?:[（(]([^）)]*)[）)])?\s*[-–－―ー]\s*(.+)$")
 HEADING_RE = re.compile(r"^(=+)\s*(.+?)\s*=+$")
+ANNIV_NAME_RE = re.compile(r"^(.+?)\s*[（(]\s*([^）)]+?)\s*[）)]$")
 
 
 def _fetch_extract(month: int, day: int) -> str:
@@ -353,29 +362,72 @@ def _fetch_extract(month: int, day: int) -> str:
 
 
 def parse_extract(text: str):
+    """Wikipediaの本文から項目を取り出す
+    できごと・誕生・死去: {"kind", "year", "bc", "paren"(かっこ内の和暦など), "body"}
+    記念日: {"kind", "body"(名前), "country", "desc"(説明)}"""
     section = None
+    anniv = None  # 説明を書き足している途中の記念日
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
         m = HEADING_RE.match(line)
         if m:
-            if len(m.group(1)) == 2:
+            if len(m.group(1)) == 2:  # 「=== 人物 ===」など小見出しでは区分を変えない
                 section = SECTION_MAP.get(m.group(2))
             continue
         if section is None:
             continue
-        m = ITEM_RE.match(line.lstrip("*・ ").strip())
-        if not m:
+
+        if section == "記念日":
+            # 記念日は「名前（ 国）」の行のあとに説明の行が続く。句点のない短い行を名前とみなす
+            if "。" not in line and len(line) <= 50:
+                if anniv:
+                    yield anniv
+                nm = ANNIV_NAME_RE.match(line)
+                anniv = {"kind": "記念日", "body": nm.group(1) if nm else line,
+                         "country": nm.group(2) if nm else "", "desc": ""}
+            elif anniv:
+                anniv["desc"] += line
             continue
-        bc, year, body = m.group(1), int(m.group(2)), m.group(3).strip()
-        yield section, (f"紀元前{year}年" if bc else f"{year}年"), (-year if bc else year), body
+
+        m = ITEM_RE.match(line.lstrip("*・ ").strip())
+        if m:
+            yield {"kind": section, "bc": bool(m.group(1)), "year": int(m.group(2)),
+                   "paren": (m.group(3) or "").strip(), "body": m.group(4).strip()}
+    if anniv:
+        yield anniv
 
 
-def history_memo(year_num: int, is_japan: bool) -> str:
+def is_japan_related(entry: dict) -> bool:
+    """日本関連かどうかの推定（キーワード判定なので完全ではない）"""
+    if entry["kind"] == "記念日":
+        # 日本の記念日（「埼玉県」など地域名の場合も含む）と、国の指定がないもの（国際デーなど）
+        c = entry["country"]
+        return c in ("", "世界") or any(w in c for w in JAPAN_WORDS)
+    body = entry["body"]
+    if any(w in body for w in JAPAN_WORDS):
+        return True
+    if entry["kind"] in ("誕生", "死去"):
+        # 「名前、職業」の名前が漢字・ひらがなだけで、外国を示す語がなければ日本人とみなす
+        name, _, rest = body.partition("、")
+        if re.fullmatch(r"[一-鿿々぀-ゟ]{2,8}", name.replace(" ", "")) \
+                and not any(h in rest for h in FOREIGN_PERSON_HINTS):
+            return True
+    return False
+
+
+def history_memo(entry: dict, is_japan: bool) -> str:
     notes = []
+    if entry["kind"] == "記念日":
+        if any(w in entry["desc"] for w in ("株式会社", "協会", "組合", "連合会", "委員会")):
+            notes.append("団体・企業が制定した記念日。由来は制定元の公式情報でも確認")
+        return " / ".join(notes)
+    year_num = -entry["year"] if entry["bc"] else entry["year"]
     if is_japan and 0 < year_num <= 1872:
-        notes.append("日本は1872年まで旧暦。新暦換算の日付なので、他の資料と1日以上ズレることがある")
+        wareki = f"（旧暦では{entry['paren']}）" if re.search(r"\d+月\d+日", entry["paren"]) else ""
+        notes.append(f"日本は1872年まで旧暦。この日付は新暦に換算したもの{wareki}。"
+                     "旧暦の日付で記念日にしている資料もあるので注意")
     if year_num < 1000:
         notes.append("古い年代は日付・年とも諸説あり")
     return " / ".join(notes)
@@ -390,22 +442,44 @@ def fetch_history(month: int, day: int):
         return [], f"{label}の取得に失敗しました: {e}"
     url = "https://ja.wikipedia.org/wiki/" + urllib.parse.quote(label)
     items = []
-    for kind, year_label, year_num, body in parse_extract(text):
-        jp = any(w in body for w in JAPAN_WORDS)
+    for e in parse_extract(text):
+        jp = is_japan_related(e)
+        if e["kind"] == "記念日":
+            year_label, year_num = "", 0
+        else:
+            year_num = -e["year"] if e["bc"] else e["year"]
+            year_label = f"紀元前{e['year']}年" if e["bc"] else f"{e['year']}年"
+            if e["paren"]:
+                year_label += f"（{e['paren']}）"  # 和暦などWikipediaのかっこ書きを残す
         items.append({
-            "label": label, "kind": kind, "year_label": year_label,
-            "year_num": year_num, "body": body, "japan": jp,
-            "memo": history_memo(year_num, jp), "url": url,
+            "label": label, "kind": e["kind"], "year_label": year_label,
+            "year_num": year_num, "body": e["body"], "desc": e.get("desc", ""),
+            "country": e.get("country", ""), "japan": jp,
+            "memo": history_memo(e, jp), "url": url,
         })
     return items, (None if items else f"{label}の項目が見つかりませんでした")
 
 
 def history_copy_text(item) -> str:
-    return f"【{item['label']}は何の日】\n{item['year_label']}：{item['body']}\n出典: {item['url']}"
+    """投稿の下書き。Wikipediaの文のままなので、書き換え前提であることを最後に明記する"""
+    if item["kind"] == "記念日":
+        where = f"（{item['country']}）" if item["country"] else ""
+        lines = [f"【{item['label']}は何の日】", f"{item['body']}{where}"]
+        if item["desc"]:
+            lines.append(item["desc"])
+    else:
+        lines = [f"【{item['label']}は何の日】", f"{item['year_label']}：{item['body']}"]
+    if item["memo"]:
+        lines.append(f"⚠️要確認: {item['memo']}")
+    lines.append(f"出典: Wikipedia「{item['label']}」{item['url']}")
+    lines.append("――（下書き：文は自分の言葉に書き換え、年・日付は別の資料でも確認）")
+    return "\n".join(lines)
 
 
 def history_rows(items) -> list:
     return [{
-        "日付": i["label"], "区分": i["kind"], "年": i["year_label"], "内容": i["body"],
+        "日付": i["label"], "区分": i["kind"], "年": i["year_label"],
+        "内容": i["body"] + (f"（{i['country']}）" if i["country"] else "")
+                + (f"：{i['desc']}" if i["desc"] else ""),
         "日本関連(推定)": "○" if i["japan"] else "", "要確認メモ": i["memo"], "出典URL": i["url"],
     } for i in items]

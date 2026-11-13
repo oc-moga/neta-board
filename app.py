@@ -134,11 +134,12 @@ def render_history():
     d = st.date_input("日付", value=datetime.now(core.JST).date(), key="hist_date")
     c1, c2 = st.columns(2)
     with c1:
-        kinds = st.multiselect("区分", ["できごと", "誕生", "死去"],
-                               default=["できごと"], key="hist_kinds")
+        kinds = st.multiselect("区分", ["記念日", "できごと", "誕生", "死去"],
+                               default=["記念日", "できごと"], key="hist_kinds")
     with c2:
         order = st.radio("並び順", ["古い順", "新しい順"], horizontal=True, key="hist_order")
-    only_jp = st.checkbox("日本関連だけ", value=True, key="hist_jp")
+    only_jp = st.checkbox("日本関連だけ", value=True, key="hist_jp",
+                          help="キーワードと人名の形から推定。記念日は日本のものと国際デーなどを残す")
 
     items, err = load_history(d.month, d.day)
     if err:
@@ -146,21 +147,38 @@ def render_history():
         return
 
     view = [i for i in items if i["kind"] in kinds and (i["japan"] or not only_jp)]
-    view.sort(key=lambda i: i["year_num"], reverse=(order == "新しい順"))
-    st.caption(f"{len(view)}件（全{len(items)}件中）")
+    annivs = [i for i in view if i["kind"] == "記念日"]
+    dated = sorted((i for i in view if i["kind"] != "記念日"),
+                   key=lambda i: i["year_num"], reverse=(order == "新しい順"))
+    st.caption(f"{len(view)}件（全{len(items)}件中）　記念日 {len(annivs)}・年のある項目 {len(dated)}")
     st.download_button(
-        "CSVで保存", core.to_csv_bytes(core.history_rows(view), core.HISTORY_COLS),
+        "CSVで保存", core.to_csv_bytes(core.history_rows(annivs + dated), core.HISTORY_COLS),
         file_name=f"rekishi_{d.month}-{d.day}.csv", mime="text/csv", key="hist_dl",
     )
 
-    for it in view:
-        with st.container(border=True):
-            st.markdown(f"**{it['year_label']}**　{it['body']}")
-            st.caption(f"{it['kind']}" + ("・日本関連" if it["japan"] else ""))
-            if it["memo"]:
-                st.warning(it["memo"], icon="⚠️")
-            with st.expander("コピー用テキスト"):
-                st.code(core.history_copy_text(it), language=None)
+    if annivs:
+        st.subheader("🎌 記念日・年中行事")
+        for it in annivs:
+            with st.container(border=True):
+                where = f"（{it['country']}）" if it["country"] else ""
+                st.markdown(f"**{it['body']}**{where}")
+                if it["desc"]:
+                    st.write(it["desc"])
+                if it["memo"]:
+                    st.warning(it["memo"], icon="⚠️")
+                with st.expander("コピー用テキスト"):
+                    st.code(core.history_copy_text(it), language=None)
+
+    if dated:
+        st.subheader("📜 できごと・人物")
+        for it in dated:
+            with st.container(border=True):
+                st.markdown(f"**{it['year_label']}**　{it['body']}")
+                st.caption(f"{it['kind']}" + ("・日本関連(推定)" if it["japan"] else ""))
+                if it["memo"]:
+                    st.warning(it["memo"], icon="⚠️")
+                with st.expander("コピー用テキスト"):
+                    st.code(core.history_copy_text(it), language=None)
 
     st.caption("Wikipediaの文章はそのまま使わず、自分の言葉で書き直して、年と日付は別の資料でも確認してから投稿してね。")
 
