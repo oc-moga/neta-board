@@ -6,6 +6,8 @@ import io
 import json
 import re
 import urllib.parse
+import socket
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -132,19 +134,30 @@ def find_hits(text: str) -> list:
 
 
 def _fetch_one(f: dict):
-    """1媒体ぶんを取得してパース。失敗したら None"""
+    """1媒体ぶんを取得してパース。(parsed, None) か、失敗したら (None, 理由) を返す"""
     try:
         req = urllib.request.Request(f["url"], headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as res:
             data = res.read()
+            ctype = res.headers.get("Content-Type", "")
         if data[:2] == b"\x1f\x8b":  # 頼んでいなくてもgzipで返す媒体がある（UN Newsなど）
             data = gzip.decompress(data)
         parsed = feedparser.parse(data)
-    except Exception:
-        return None
+    except urllib.error.HTTPError as e:
+        # 403 = アクセス拒否（クラウドのサーバーからの接続を弾いている可能性）、404 = URLが無い
+        return None, f"HTTP {e.code}"
+    except (TimeoutError, socket.timeout):
+        return None, f"{FETCH_TIMEOUT}秒以内に応答なし"
+    except urllib.error.URLError as e:
+        reason = e.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return None, f"{FETCH_TIMEOUT}秒以内に応答なし"
+        return None, f"接続エラー（{reason}）"
+    except Exception as e:
+        return None, f"{type(e).__name__}"
     if parsed.bozo and not parsed.entries:
-        return None
-    return parsed
+        return None, f"RSSとして読めない中身（{ctype or '種類不明'}）"
+    return parsed, None
 
 
 def fetch_feeds(feeds: list, hours: int):
@@ -157,9 +170,9 @@ def fetch_feeds(feeds: list, hours: int):
     with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(_fetch_one, feeds))
 
-    for f, parsed in zip(feeds, results):
+    for f, (parsed, reason) in zip(feeds, results):
         if parsed is None:
-            errors.append(f["name"])
+            errors.append(f"{f['name']}（{reason}）")
             continue
         count = 0
         # 上限で切る前に新しい順へ並べ替え（フィードによっては並びが日付順でない）
