@@ -77,7 +77,7 @@ def render_news(items, errors, prefix: str):
         only_me = st.toggle("🕌 中東関連だけ", value=False, key=f"{prefix}_me")
     with c2:
         show_ps = st.toggle("当事国の政府系も表示", value=False, key=f"{prefix}_ps",
-                            help="イラン（Tehran Times）・トルコ（Anadolu）の政府系メディア。"
+                            help="トルコ（Anadolu）の政府系メディア。"
                                  "当事国の公式見解を知る目的で使い、事実の裏取りには使わないのがおすすめ")
     if not show_ps:
         items = [i for i in items if not i["party_state"]]

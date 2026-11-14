@@ -50,19 +50,18 @@ FEEDS = [
      "url": "https://www1.cbn.com/app_feeds/rss/news/rss.php?section=world"},
     {"name": "CBN News Israel", "base": "米国", "kind": "宗教系(キリスト教)", "mideast": True,
      "url": "https://www1.cbn.com/app_feeds/rss/news/rss.php?section=israel"},
-    {"name": "NPR World", "base": "米国", "kind": "非営利", "mideast": False,
-     "url": "https://feeds.npr.org/1004/rss.xml"},
+    # NPR World はStreamlit Cloudから取得できないため外し、同じ米公共メディアのPBSに替えた
+    {"name": "PBS NewsHour World", "base": "米国", "kind": "公共放送", "mideast": False,
+     "url": "https://www.pbs.org/newshour/feeds/rss/world"},
     # --- 中東 ---
     {"name": "Al Jazeera", "base": "カタール", "kind": "政府出資", "mideast": False,
      "url": "https://www.aljazeera.com/xml/rss/all.xml"},
     {"name": "The National", "base": "UAE", "kind": "王族系資本", "mideast": True,
      "url": "https://www.thenationalnews.com/arc/outboundfeeds/rss/category/news/mena/?outputType=xml"},
-    {"name": "Times of Israel", "base": "イスラエル", "kind": "民間", "mideast": True,
-     "url": "https://www.timesofisrael.com/feed/"},
+    # Times of Israel・Tehran Times はStreamlit Cloudから取得できないため外した
+    # （イランの媒体はクラウドから届かないものが多く、Mehr News も同じ配信網のため見送り）
     {"name": "Haaretz", "base": "イスラエル", "kind": "民間", "mideast": True,
      "url": "https://www.haaretz.com/srv/haaretz-latest-headlines"},
-    {"name": "Tehran Times", "base": "イラン", "kind": "国営系", "mideast": True,
-     "party_state": True, "url": "https://www.tehrantimes.com/rss"},
     {"name": "Anadolu Agency", "base": "トルコ", "kind": "国営通信", "mideast": True,
      "party_state": True, "url": "https://www.aa.com.tr/en/rss/default?cat=middle-east"},
     # --- 国際機関 ---
